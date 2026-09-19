@@ -1,0 +1,5 @@
+.build/
+.local-research/
+Siri Flow Guard.app/
+.DS_Store
+*.log
