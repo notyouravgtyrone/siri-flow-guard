@@ -5,6 +5,8 @@ import Darwin
 
 private let flowID = "com.electron.wispr-flow"
 private let siriID = "com.apple.campo"
+private let alfredID = "com.runningwithcrayons.Alfred"
+private let languageToolID = "org.languagetool.desktop"
 private let mode = CommandLine.arguments.dropFirst().first ?? "--observe"
 private let lockPath = NSTemporaryDirectory() + "flow-siri-guard-\(getuid()).lock"
 private let healthPath = NSTemporaryDirectory() + "flow-siri-guard-\(getuid()).health.json"
@@ -33,10 +35,16 @@ private func windows(_ pid: pid_t) -> WindowState {
     return result
 }
 
+private func siriHasWindow(_ pid: pid_t) -> Bool {
+    let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] ?? []
+    return info.contains { ($0[kCGWindowOwnerPID as String] as? Int) == Int(pid) }
+}
+
 private final class PreinputGuard {
     var tap: CFMachPort?
     var tapSource: CFRunLoopSource?
     var flow: NSRunningApplication?
+    var extra: [NSRunningApplication] = []
     var leasePID: pid_t?
     var deadline: TimeInterval = 0
     var latestTrigger: TimeInterval = 0
@@ -176,6 +184,8 @@ private final class PreinputGuard {
             if code == 36 || code == 76 {
                 let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
                 if front == siriID { trigger = "siri-return" }
+                else if let alfred = NSRunningApplication.runningApplications(withBundleIdentifier: alfredID).first, siriHasWindow(alfred.processIdentifier) { trigger = "alfred-return" }
+                else if let siri, siriHasWindow(siri.processIdentifier) { trigger = "siri-bubble-return" }
                 else { log("return ignored: front=\(front == flowID ? "flow" : "other")") }
             }
         } else if type == .flagsChanged { inputClass = "modifier" }
@@ -219,7 +229,7 @@ private final class PreinputGuard {
         }
         if leasePID != nil {
             latestTrigger = ProcessInfo.processInfo.systemUptime
-            deadline = ProcessInfo.processInfo.systemUptime + 0.5
+            deadline = ProcessInfo.processInfo.systemUptime + (trigger == "alfred-return" ? 1.5 : 0.5)
             log("lease renewed by \(trigger)")
             return
         }
@@ -234,9 +244,11 @@ private final class PreinputGuard {
         flow = app; leasePID = app.processIdentifier
         restoreAttempts = 0
         latestTrigger = ProcessInfo.processInfo.systemUptime
-        deadline = ProcessInfo.processInfo.systemUptime + 0.5
+        deadline = ProcessInfo.processInfo.systemUptime + (trigger == "alfred-return" ? 1.5 : 0.5)
         let began = ProcessInfo.processInfo.systemUptime
         _ = app.hide()
+        extra = NSRunningApplication.runningApplications(withBundleIdentifier: languageToolID).filter { !$0.isHidden }
+        for other in extra { _ = other.hide() }
         while ProcessInfo.processInfo.systemUptime - began < 0.06 {
             if !windows(app.processIdentifier).status {
                 latestTrigger = ProcessInfo.processInfo.systemUptime
@@ -258,6 +270,7 @@ private final class PreinputGuard {
                 Thread.sleep(forTimeInterval: min(remaining, 0.15))
             }
         }
+        for other in extra where !other.isTerminated { _ = other.unhide() }
         guard let app = flow, !app.isTerminated, app.processIdentifier == pid else {
             flow = nil; leasePID = nil; pendingRestore = nil; return
         }
